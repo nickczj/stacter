@@ -1,0 +1,20 @@
+{
+  "name": "@stacter/engine",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Stacter's detection engine: turns collected signals into detections with evidence, grouped by layer.",
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.5.1",
+    "typescript": "~6.0.3",
+    "vitest": "~4.1.12"
+  }
+}

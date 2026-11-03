@@ -1,0 +1,28 @@
+{
+  "name": "stacter",
+  "version": "0.0.0",
+  "private": true,
+  "description": "See how any website is built, and learn how we can tell.",
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "packageManager": "bun@1.4.4",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "bun run --filter @stacter/web dev",
+    "build": "bun run --filter @stacter/web build",
+    "preview": "bun run --filter @stacter/web preview",
+    "deploy": "bun run --filter @stacter/web deploy",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "typecheck": "bun run --filter '*' typecheck",
+    "test": "bun run --filter '*' test"
+  },
+  "devDependencies": {
+    "@nuxt/eslint-config": "^1.17.0",
+    "eslint": "^10.14.0",
+    "typescript": "~6.0.3"
+  }
+}

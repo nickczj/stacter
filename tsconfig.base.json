@@ -1,0 +1,23 @@
+{
+  // Shared compiler options for the packages under packages/*.
+  // apps/web uses the tsconfig that Nuxt generates instead.
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    // Web-standard globals only (URL, TextDecoder, fetch, …): no DOM and no
+    // Node types, so package code stays portable across Workers, Bun, Node
+    // and browsers.
+    "lib": ["ES2023", "WebWorker"],
+    "types": [],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  }
+}

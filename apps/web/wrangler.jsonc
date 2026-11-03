@@ -1,0 +1,17 @@
+// Wrangler configuration: https://developers.cloudflare.com/workers/wrangler/configuration/
+// `nuxt build` merges this into .output/server/wrangler.json, which is what
+// `wrangler dev` and `wrangler deploy` use (via .wrangler/deploy/config.json).
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "stacter",
+  "main": "./.output/server/index.mjs",
+  "compatibility_date": "2026-11-03",
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "./.output/public/"
+  },
+  "observability": {
+    "enabled": true
+  },
+  "upload_source_maps": true
+}
