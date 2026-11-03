@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Cancel superseded runs on branches, but never interrupt a deploy from main.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  check:
+    name: Lint, typecheck, test, build
+    # Branches in this repo are covered by their push runs, so only run
+    # pull_request events for pull requests from forks.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    outputs:
+      can-deploy: ${{ steps.cloudflare.outputs.configured }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+
+      # Uses the Bun version pinned in package.json's "packageManager" field.
+      - uses: oven-sh/setup-bun@v2
+
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+      - run: bun run typecheck
+      - run: bun run test
+      - run: bun run build
+
+      - name: Check for Cloudflare credentials
+        id: cloudflare
+        env:
+          CONFIGURED: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+        run: echo "configured=$CONFIGURED" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy to Cloudflare Workers
+    needs: check
+    # Production deploys come from main only, and only once the Cloudflare
+    # secrets exist (see README → Deploying).
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.check.outputs.can-deploy == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+
+      - uses: oven-sh/setup-bun@v2
+
+      - run: bun install --frozen-lockfile
+
+      - run: bun run deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
