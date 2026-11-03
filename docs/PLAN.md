@@ -2,7 +2,7 @@
 
 > Living document. When something meaningful changes: tick the task, update the status table, and add a dated line to the [progress log](#12-progress-log).
 
-**Last updated:** 2026-11-03 · **Current focus:** M0 — Foundations · **Next action:** Spike S1 (fingerprint data and license)
+**Last updated:** 2026-11-03 · **Current focus:** M0 — Foundations; everything that doesn't need a Cloudflare account is done · **Next action:** create `main` and add the Cloudflare secrets (see M0), then spikes S3 and S5. M1 can start in parallel.
 
 **Contents:** [1. Status](#1-status-at-a-glance) · [2. What we're building](#2-what-were-building) · [3. Principles](#3-principles) · [4. Layer model](#4-the-layer-model) · [5. Evidence model](#5-evidence-model) · [6. Architecture](#6-architecture) · [7. Decisions](#7-decision-log) · [8. Milestones](#8-milestones) · [9. Spikes](#9-spikes) · [10. Risks](#10-risks) · [11. Open questions](#11-open-questions) · [12. Progress log](#12-progress-log)
 
@@ -14,7 +14,7 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done · ⏸️ deferred
 
 | | Milestone | What ships | Status |
 |---|---|---|---|
-| M0 | Foundations | Monorepo, CI, hello-world on Cloudflare Workers, spikes S1–S5 | ⬜ |
+| M0 | Foundations | Monorepo, CI, hello-world on Cloudflare Workers, spikes S1–S5 | 🟨 |
 | M1 | Evidence engine | `@stacter/engine`, `@stacter/collect`, `@stacter/cli`: detections with evidence, grouped by layer | ⬜ |
 | M2 | **X-ray MVP** (first public release) | Static scans on the web: layered X-ray, evidence drawer, "verify it yourself", request anatomy | ⬜ |
 | M3 | Rendered scans | Headless-browser scans and the static-vs-rendered lesson | ⬜ |
@@ -74,8 +74,8 @@ Next to the layers, a **Request anatomy** panel shows the redirect chain, the st
 
 Design notes:
 - **One vendor, many layers.** Cloudflare can appear as DNS (NS records), edge (`cf-ray`) and hosting (Workers). The UI can also group by vendor and call out concentration ("this site relies on Cloudflare for 3 layers").
-- **Category → layer mapping.** Fingerprints carry categories (CDN, PaaS, Web servers, JavaScript frameworks, Analytics, …). `packages/engine/src/layers.ts` maps category names to layers, with per-technology overrides. Unmapped categories land in an `other` bucket, and a test lists them whenever the fingerprints are updated.
-- **Stacter's own rules.** Expect gaps in the vendored data for DNS, email, CNAME-target and ASN signals (S1 measures how big). Stacter adds its own rules **in the same format** under `packages/fingerprints/stacter/` and contributes upstream where they fit.
+- **Category → layer mapping.** Fingerprints carry categories (CDN, PaaS, Web servers, JavaScript frameworks, Analytics, …). `packages/engine/src/layers.ts` maps category names to layers, with per-technology overrides. Unmapped categories land in an `other` bucket, and a test lists them whenever the fingerprints are updated. S1 found that 12% of technologies have several categories, and that the upstream category `priority` is a display weight rather than a layer, so placement follows its own precedence and, for vendors that span layers, the evidence source (D-017).
+- **Stacter's own rules.** The vendored data is thin on DNS, email, CNAME-target and ASN signals (S1: 186 DNS patterns across 7,695 technologies) and has some gaps and stale rules elsewhere. Stacter adds its own rules **in the same format** under `packages/fingerprints/stacter/` and contributes upstream where they fit.
 
 ---
 
@@ -224,8 +224,10 @@ stacter/
 │   ├── fingerprints/        # vendored webappanalyzer @ pinned commit + Stacter rules + compile script
 │   └── cli/                 # @stacter/cli: `stacter scan|record` for development and fixtures
 ├── content/                 # explanations: tech/, signals/, headers/, guides/
+├── spikes/                  # throwaway spike scripts
 └── docs/
-    └── PLAN.md              # this file
+    ├── PLAN.md              # this file
+    └── spikes.md            # spike findings
 ```
 
 ### Scan pipeline
@@ -265,9 +267,9 @@ The Worker never executes fetched JavaScript: the engine only parses it and matc
 
 - **Compile once.** Rules are parsed and validated at build time (`packages/fingerprints` → compiled JSON); RegExps are built lazily, once per isolate.
 - **Parsing:** `htmlparser2` for extraction with source offsets, `css-select` for `dom` rules. Not Workers' `HTMLRewriter`, which only exists on Workers.
-- **Fingerprint fields covered by static scans:** `headers`, `cookies`, `meta`, `html`, `text`, `url`, `robots`, `scriptSrc`, `scripts`, `dns`, `dom` (existence, attributes and text), and `js` through an inline-assignment heuristic (e.g. `window.__NUXT__=` inside an inline script, scored lower than a runtime hit).
+- **Fingerprint fields covered by static scans:** `headers`, `cookies`, `meta`, `html`, `text`, `url`, `robots`, `scriptSrc`, `scripts`, `dns`, `dom` (existence, attributes and text), and `js` through an inline-assignment heuristic: explicit global assignments only (e.g. `window.__NUXT__=` inside an inline script), scored lower than a runtime hit. S2 showed that plain substring matching of `js` keys is both slow and wrong.
 - **Rendered scans only:** `js` (real runtime values), `dom` properties, `xhr`. **Skipped:** `probe`, since it costs extra requests per technology.
-- **Performance budget:** < 50 ms CPU p95 on a 1 MB page. If it's over, add literal-substring prefilters before running regexes, and cap input per field.
+- **Performance budget:** < 50 ms CPU p95 for typical pages. S2 measured the design that gets there (D-018): extract each regex's required literal at build time, find all literals in one Aho–Corasick pass per input, and run only the candidate regexes. That took 12–67 ms per page (163 KB–1.3 MB), against 52–809 ms for running every regex. The automaton and literal table are precomputed at build time, and RegExps are compiled lazily.
 - **Safety:** the rules come from a third party, so lint regexes for catastrophic backtracking at compile time and cap inputs.
 - **Gotcha:** inside Workers, `Date.now()` and `performance.now()` don't advance during synchronous work. Benchmark the engine in Bun/Node (via the CLI) and confirm with Workers' CPU-time metrics.
 
@@ -281,7 +283,7 @@ The Worker never executes fetched JavaScript: the engine only parses it and matc
 
 - **Unit tests:** pattern parser, each matcher, version extraction, confidence, relations, layer mapping.
 - **Golden fixtures:** a minimal snapshot per seed technology, hand-written or trimmed to the relevant snippets. Don't commit full copies of third-party pages.
-- **Runtime parity:** engine tests run under Bun/Node *and* inside workerd (`@cloudflare/vitest-pool-workers`).
+- **Runtime parity:** engine tests run under Node *and* inside workerd (`@cloudflare/vitest-plugin`), set up in M0.
 - **Accuracy set:** ~30 sites with publicly known stacks (including Stacter itself). Track the precision of Confirmed detections per layer.
 - **E2E:** Playwright against `wrangler dev`: scan → X-ray → evidence drawer.
 - **Untrusted content:** evidence snippets are third-party text. Render them as text, never with `v-html`.
@@ -297,33 +299,42 @@ The Worker never executes fetched JavaScript: the engine only parses it and matc
 | D-003 | 2026-11-03 | Nuxt 4.x on Cloudflare **Workers + Static Assets** via Nitro's `cloudflare_module` preset and Wrangler. Not Pages (Cloudflare steers new projects to Workers); not NuxtHub (went multi-cloud, deprecated its deploy command) | Decided |
 | D-004 | 2026-11-03 | Bun for installs, workspaces and scripts only. Production runs on workerd, so no `Bun.*` / `bun:*` APIs in shipped code | Decided |
 | D-005 | 2026-11-03 | The detection engine is a pure, runtime-agnostic TS package. Cloudflare-specific code lives only in `apps/web/server/adapters` | Decided |
-| D-006 | 2026-11-03 | Fingerprints: vendor `enthec/webappanalyzer` at a pinned commit; add Stacter rules in the same format | Decided (license check in S1) |
+| D-006 | 2026-11-03 | Fingerprints: vendor `enthec/webappanalyzer` at a pinned commit; add Stacter rules in the same format | Decided (S1 confirmed the license and format) |
 | D-007 | 2026-11-03 | `htmlparser2` + `css-select` for parsing (portable), not `HTMLRewriter` | Proposed |
-| D-008 | 2026-11-03 | Vitest across the repo (Nuxt's test utils and Cloudflare's Workers pool both need it), run through Bun | Proposed |
-| D-009 | 2026-11-03 | DNS via DoH JSON APIs; IP owner via Team Cymru (over DoH) or RIPEstat, chosen in S4 | Proposed |
-| D-010 | — | Project license. The fingerprints are GPL-3.0; GPL-3.0 for the whole repo is the simplest fit, especially once the engine ships to browsers (playground, extension) | **Needs decision** |
+| D-008 | 2026-11-03 | Vitest across the repo, run through Bun. Engine tests run under Node and inside workerd via `@cloudflare/vitest-plugin` (the renamed `vitest-pool-workers`) | Decided (M0) |
+| D-009 | 2026-11-03 | DNS via DoH JSON APIs. IP owner via Team Cymru over DoH (two DNS queries through the same client), with RIPEstat as the fallback | Decided (S4) |
+| D-010 | 2026-11-03 | Project license: **GPL-3.0-only**, matching the fingerprint data (GPL v3, no "or any later version" notice). It covers the whole repo, including the engine when it ships to browsers later | Decided |
 | D-011 | 2026-11-03 | Scan permalinks are unlisted and `noindex`; no public "recent scans" feed in v1 | Proposed |
 | D-012 | 2026-11-03 | Never evade bot protection (no residential proxies, no CAPTCHA solving): report "blocked" and explain it | Decided |
 | D-013 | 2026-11-03 | Workers Paid from M2: the free plan's 10 ms CPU limit won't fit rule matching | Decided |
+| D-014 | 2026-11-03 | Deploy from GitHub Actions on pushes to `main`, and only once the `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets exist (rather than Workers Builds): one pipeline, and deploys only happen after the checks pass | Decided |
+| D-015 | 2026-11-03 | TypeScript 6.0: typescript-eslint doesn't support TypeScript 7 yet (`<6.1.0`). Revisit when it does | Decided |
+| D-016 | 2026-11-03 | Workers runtime types are generated by `wrangler types` on install, not committed | Decided |
+| D-017 | 2026-11-03 | Layer placement: category → layer defaults; for multi-category technologies, prefer framework > server > hosting > edge > frontend > services; place evidence by its source when that points to another layer (NS records → DNS); per-technology overrides | Proposed (S1); confirm in M1 |
+| D-018 | 2026-11-03 | Matching: required-literal prefilter with one Aho–Corasick pass per input, lazy RegExp compilation, and setup precomputed at build time | Decided (S2) |
 
 ---
 
 ## 8. Milestones
 
-### M0 — Foundations ⬜
+### M0 — Foundations 🟨
 
 **Goal:** a deployable skeleton, CI, and the risky unknowns answered.
 
-- [ ] Decide the license (D-010) and add `LICENSE`
-- [ ] Bun workspaces: root `package.json` with `apps/*` and `packages/*`; commit `bun.lock`
-- [ ] Shared strict TypeScript config (`tsconfig.base.json`)
-- [ ] `apps/web`: Nuxt 4 from Cloudflare's C3 Nuxt template (or `nuxi init` + `cloudflare_module` preset); `wrangler.jsonc` with Static Assets
-- [ ] Deploy a placeholder page to `*.workers.dev`
-- [ ] Choose a deploy path: Workers Builds or GitHub Actions + `wrangler deploy`
-- [ ] Lint with `@nuxt/eslint` (flat config) across the repo
-- [ ] Vitest in `packages/engine`, plus a workerd project via `@cloudflare/vitest-pool-workers`
-- [ ] CI: `bun install --frozen-lockfile`, typecheck, lint, test, build
-- [ ] Run spikes S1–S5 (§9) and record findings
+- [x] Decide the license (D-010) and add `LICENSE`: GPL-3.0-only
+- [x] Bun workspaces: root `package.json` with `apps/*` and `packages/*`; commit `bun.lock`
+- [x] Shared strict TypeScript config (`tsconfig.base.json`)
+- [x] `apps/web`: Nuxt 4 set up like Cloudflare's C3 Nuxt template (`cloudflare_module` preset); `wrangler.jsonc` with Static Assets. Verified in workerd with `wrangler dev`, and with `wrangler deploy --dry-run`
+- [x] Placeholder page that renders the seven layers from `@stacter/engine`, plus `/api/health`
+- [x] Choose a deploy path: GitHub Actions + `wrangler deploy` (D-014)
+- [x] Lint with `@nuxt/eslint-config` (flat config, stylistic) across the repo, plus a portability guard for the engine
+- [x] Vitest in `packages/engine`, with every test running under Node and inside workerd (`@cloudflare/vitest-plugin`)
+- [x] CI: `bun install --frozen-lockfile`, lint, typecheck, test, build; green on the first run
+- [x] Spikes S1, S2 and S4 run and recorded (§9, [docs/spikes.md](spikes.md))
+- [ ] **Owner:** create `main` from this branch and make it the default branch. The repo's only branch is currently `claude/ecstatic-feynman-mk5yhj`
+- [ ] **Owner:** add the `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` repository secrets (README → Deploying)
+- [ ] First deploy of the placeholder to `*.workers.dev`
+- [ ] Spikes S3 and S5, plus the Workers half of S2 and S4 (they all need the deployed Worker)
 
 **Exit:** `main` deploys to Workers, CI is green, and spike findings are recorded in §9.
 
@@ -333,29 +344,29 @@ The Worker never executes fetched JavaScript: the engine only parses it and matc
 
 Fingerprints
 - [ ] Sync script: fetch webappanalyzer at a pinned commit into `packages/fingerprints/vendor/`, with `SOURCE.md` (commit, date, license)
-- [ ] Compiler: parse pattern strings (`regex\;version:\1\;confidence:50`) into `{ regex, version, confidence }`; validate against the schema; lint regexes; emit compiled JSON with stable rule IDs
-- [ ] Stacter rules, same format: DNS providers (NS), email providers (MX), SPF includes, domain-verification TXT records, hosting CNAME targets, ASN → provider
+- [ ] Compiler: parse pattern strings (`regex\;version:\1\;confidence:50`) into `{ regex, version, confidence }`; validate against the schema; lint regexes (flag the `[\s\S]*` + literal shape, S2); extract each regex's required literal; emit compiled JSON with stable rule IDs, the literal table and the automaton (D-018)
+- [ ] Stacter rules, same format: DNS providers (NS), email providers (MX, e.g. Cloudflare Email Routing), SPF includes, domain-verification TXT records, hosting CNAME targets, ASN → provider. Plus the S1 gaps: Next.js `/_next/` and `__NEXT_DATA__`, Nuxt's `x-powered-by: Nuxt`, and current Cloudflare cookies (`__cf_bm`; upstream still has the retired `__cfduid`). Open upstream PRs where they fit
 
 Engine
 - [ ] HTML extraction (`htmlparser2`): meta tags, script URLs, inline scripts, text, inline styles, all with source offsets
-- [ ] Static matchers: `headers`, `cookies`, `meta`, `html`, `text`, `url`, `robots`, `scriptSrc`, `scripts`, `dns`, `dom` (static subset)
-- [ ] Inline-assignment heuristic for `js` keys (`window.__NUXT__=`), lower confidence than a runtime hit
+- [ ] Static matchers: `headers`, `cookies`, `meta`, `html`, `text`, `url`, `robots`, `scriptSrc`, `scripts`, `dns`, `dom` (static subset), with regexes behind the single-pass literal prefilter and compiled lazily (D-018)
+- [ ] Inline-assignment heuristic for `js` keys: explicit `window.X =`, `self.X =` and `globalThis.X =` assignments only, with lower confidence than a runtime hit
 - [ ] Evidence capture: matched text with context, location (resource + line/column), rule ID
 - [ ] Version extraction, including the ternary syntax; merge versions across evidence
 - [ ] Confidence aggregation → `confirmed` / `likely` / `possible`; `inferred` for implies
 - [ ] Relations: `implies` (with the reason recorded), `requires`, `requiresCategory`, `excludes`
-- [ ] Layers: category → layer map, per-tech overrides, `other` bucket, unmapped-category test
+- [ ] Layers: category → layer defaults (draft in [docs/spikes.md](spikes.md#s1--fingerprint-data)), multi-category precedence and evidence-source placement (D-017), per-tech overrides, `other` bucket, unmapped-category test
 - [ ] Export `jsKeys()` and `domSelectors()` so the rendered collector (M3) knows what to evaluate
 
 Collectors and CLI
 - [ ] `@stacter/collect` HTTP collector: manual redirects, caps and timeouts from §6, `Set-Cookie` parsing, charset decoding
-- [ ] `@stacter/collect` DNS collector: DoH for A/AAAA/CNAME/NS/MX/TXT/CAA, plus IP owner
+- [ ] `@stacter/collect` DNS collector: DoH for A/AAAA/CNAME/NS/MX/TXT/CAA, plus IP owner via Team Cymru (D-009). Normalise TXT quoting, and treat an SOA-only `Authority` as "no records" (S4)
 - [ ] CLI: `stacter scan <url> [--json] [--explain]` (grouped by layer, with evidence and "why"); `stacter record <url>` (writes a trimmed fixture)
 
 Quality
 - [ ] Unit tests per matcher; ≥ 1 golden fixture per seed technology (M2 list)
 - [ ] The engine test suite passes under Bun/Node and in workerd
-- [ ] Benchmark: < 50 ms CPU p95 on a 1 MB page (prefilters if needed)
+- [ ] Benchmark against the S2 baseline (12–67 ms per page): < 50 ms CPU p95 for typical pages, now including `htmlparser2` extraction, which S2 didn't measure
 
 **Exit:** `stacter scan` on a Nuxt-on-Cloudflare site prints Cloudflare (`cf-ray`, `server: cloudflare`) and Nuxt (`__NUXT__`, `/_nuxt/`) with located evidence, plus Vue as *inferred*. Fixtures pass in both runtimes, within the CPU budget.
 
@@ -450,13 +461,13 @@ Quality
 
 | ID | Question | Approach | Status | Finding |
 |---|---|---|---|---|
-| S1 | Fingerprint data: license, schema fields (does `certIssuer` exist?), technology and category counts, layer coverage | Pull the pinned commit; read `LICENSE` and `schema.json`; draft the category → layer map | ⬜ | |
-| S2 | Can the engine stay under 50 ms CPU p95? | Benchmark compile + match on 5 real pages in Bun/Node; confirm with Workers CPU-time metrics | ⬜ | |
-| S3 | How often do sites block or challenge requests from Workers? | Static-fetch ~50 popular sites from a deployed Worker; log statuses and challenge markers | ⬜ | |
-| S4 | DNS and IP owner from Workers | DoH for every record type; compare Team Cymru (TXT over DoH) with RIPEstat for ASN | ⬜ | |
-| S5 | Browser Run capabilities and cost | Puppeteer session: JS globals, network log, cookies, TLS `securityDetails()`; browser-seconds per scan; session reuse | ⬜ | |
+| S1 | Fingerprint data: license, schema fields (does `certIssuer` exist?), technology and category counts, layer coverage | Pull the pinned commit; read `LICENSE` and `schema.json`; draft the category → layer map | ✅ | GPL v3 with no "or later" notice (D-010). 7,695 technologies, 13,958 patterns, all valid JS RegExps. `certIssuer` exists but only 6 technologies use it. 88% of technologies have a rule a plain fetch can see; DNS rules are thin. Gaps: Next.js `/_next/`, Nuxt `x-powered-by`, a stale Cloudflare cookie; Deno has no rules of its own, Bun none at all. Category `priority` isn't a layer (D-017). [Details](spikes.md#s1--fingerprint-data) |
+| S2 | Can the engine stay under 50 ms CPU p95? | Benchmark compile + match on real pages in Bun/Node; confirm with Workers CPU-time metrics | 🟨 | Locally, running every regex costs 52–809 ms per page; a required-literal prefilter with one Aho–Corasick pass gets 12–67 ms with identical detections (D-018). The Workers check waits for a deploy. [Details](spikes.md#s2--matching-cpu-budget) |
+| S3 | How often do sites block or challenge requests from Workers? | Static-fetch ~50 popular sites from a deployed Worker; log statuses and challenge markers | ⏸️ | Needs the deployed Worker |
+| S4 | DNS and IP owner from Workers | DoH for every record type; compare Team Cymru (TXT over DoH) with RIPEstat for ASN | 🟨 | DoH JSON covers every record type (format notes recorded). Team Cymru and RIPEstat agree (D-009). Latency from Workers waits for a deploy. [Details](spikes.md#s4--dns-and-ip-owner) |
+| S5 | Browser Run capabilities and cost | Puppeteer session: JS globals, network log, cookies, TLS `securityDetails()`; browser-seconds per scan; session reuse | ⏸️ | Needs a Cloudflare account |
 | S6 | Content pipeline | Nuxt Content on Workers (D1) vs importing `content/` as JSON at build time | ⬜ | |
-| S7 | TLS issuer for static scans | Workers' `fetch` doesn't expose the peer certificate. Options: rendered scans only, Certificate Transparency logs, or skip | ⬜ | |
+| S7 | TLS issuer for static scans | Workers' `fetch` doesn't expose the peer certificate. Options: rendered scans only, Certificate Transparency logs, or skip | ⬜ | Lower priority: S1 found only 6 technologies with `certIssuer` rules |
 
 ---
 
@@ -479,12 +490,12 @@ Quality
 
 ## 11. Open questions
 
-1. **License** (D-010): GPL-3.0, AGPL-3.0, or MIT code with the GPL data kept in its own package?
-2. **Domain and branding.**
-3. **Scan visibility:** keep the unlisted + `noindex` default (D-011)?
-4. **UI kit:** Nuxt UI or hand-rolled Tailwind?
-5. **Content authoring:** fully hand-written, or LLM-drafted with human review? Accuracy matters more than speed for an education tool.
-6. **First public release:** ship at M2, or wait for M3 so client-rendered sites don't look sparse?
+1. **Domain and branding.**
+2. **Scan visibility:** keep the unlisted + `noindex` default (D-011)?
+3. **UI kit:** Nuxt UI or hand-rolled Tailwind?
+4. **Content authoring:** fully hand-written, or LLM-drafted with human review? Accuracy matters more than speed for an education tool.
+5. **First public release:** ship at M2, or wait for M3 so client-rendered sites don't look sparse?
+6. **Logos:** the fingerprint repo ships brand icons. The GPL covers the files, not the trademarks: show them (for identification only) or use neutral icons?
 
 ---
 
@@ -492,6 +503,7 @@ Quality
 
 Newest first. One line per meaningful change: merged work, spike results, decisions.
 
+- **2026-11-03** — M0 under way. License set to GPL-3.0-only. Bun workspace with Nuxt 4 on Cloudflare Workers (`apps/web`) and `@stacter/engine` (`packages/engine`); every engine test runs under both Node and workerd; ESLint includes an engine portability guard. CI was green on its [first run](https://github.com/nickczj/stacter/actions/runs/41653430138). Spikes S1, S2 and S4 are recorded in [docs/spikes.md](spikes.md). The first deploy, S3 and S5 wait on a Cloudflare account and a `main` branch.
 - **2026-11-03** — Repository started with this plan; no code yet. Direction set: education-first X-ray with evidence for every detection, results laid out in request order (DNS → edge → hosting → server → framework → frontend → services). Stack: Nuxt 4 on Cloudflare Workers, Bun for tooling.
 
 ### Updating this document
