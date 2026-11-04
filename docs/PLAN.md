@@ -2,7 +2,7 @@
 
 > Living document. When something meaningful changes: tick the task, update the status table, and add a dated line to the [progress log](#12-progress-log).
 
-**Last updated:** 2026-11-03 · **Current focus:** M0 — Foundations; everything that doesn't need a Cloudflare account is done · **Next action:** create `main` and add the Cloudflare secrets (see M0), then spikes S3 and S5. M1 can start in parallel.
+**Last updated:** 2026-11-04 · **Current focus:** M1 — Evidence engine. M0 is done · **Next action:** spike S8 (origin response headers on Workers, since `fetch()` rewrites them: [S3](spikes.md#s3--fetch-reliability-from-workers)), then the fingerprint sync and compiler.
 
 **Contents:** [1. Status](#1-status-at-a-glance) · [2. What we're building](#2-what-were-building) · [3. Principles](#3-principles) · [4. Layer model](#4-the-layer-model) · [5. Evidence model](#5-evidence-model) · [6. Architecture](#6-architecture) · [7. Decisions](#7-decision-log) · [8. Milestones](#8-milestones) · [9. Spikes](#9-spikes) · [10. Risks](#10-risks) · [11. Open questions](#11-open-questions) · [12. Progress log](#12-progress-log)
 
@@ -14,7 +14,7 @@ Legend: ⬜ not started · 🟨 in progress · ✅ done · ⏸️ deferred
 
 | | Milestone | What ships | Status |
 |---|---|---|---|
-| M0 | Foundations | Monorepo, CI, hello-world on Cloudflare Workers, spikes S1–S5 | 🟨 |
+| M0 | Foundations | Monorepo, CI, hello-world on Cloudflare Workers, spikes S1–S5 | ✅ |
 | M1 | Evidence engine | `@stacter/engine`, `@stacter/collect`, `@stacter/cli`: detections with evidence, grouped by layer | ⬜ |
 | M2 | **X-ray MVP** (first public release) | Static scans on the web: layered X-ray, evidence drawer, "verify it yourself", request anatomy | ⬜ |
 | M3 | Rendered scans | Headless-browser scans and the static-vs-rendered lesson | ⬜ |
@@ -269,9 +269,10 @@ The Worker never executes fetched JavaScript: the engine only parses it and matc
 - **Parsing:** `htmlparser2` for extraction with source offsets, `css-select` for `dom` rules. Not Workers' `HTMLRewriter`, which only exists on Workers.
 - **Fingerprint fields covered by static scans:** `headers`, `cookies`, `meta`, `html`, `text`, `url`, `robots`, `scriptSrc`, `scripts`, `dns`, `dom` (existence, attributes and text), and `js` through an inline-assignment heuristic: explicit global assignments only (e.g. `window.__NUXT__=` inside an inline script), scored lower than a runtime hit. S2 showed that plain substring matching of `js` keys is both slow and wrong.
 - **Rendered scans only:** `js` (real runtime values), `dom` properties, `xhr`. **Skipped:** `probe`, since it costs extra requests per technology.
-- **Performance budget:** < 50 ms CPU p95 for typical pages. S2 measured the design that gets there (D-018): extract each regex's required literal at build time, find all literals in one Aho–Corasick pass per input, and run only the candidate regexes. That took 12–67 ms per page (163 KB–1.3 MB), against 52–809 ms for running every regex. The automaton and literal table are precomputed at build time, and RegExps are compiled lazily.
+- **Performance budget:** < 50 ms CPU p95 for typical pages. S2 measured the design that gets there (D-018): extract each regex's required literal at build time, find all literals in one Aho–Corasick pass per input, and run only the candidate regexes. That took 12–67 ms per page (163 KB–1.3 MB), against 52–809 ms for running every regex. The automaton and literal table are precomputed at build time, and RegExps are compiled lazily. On Workers the same matcher costs 2–3× more CPU than in Node on a Mac (~20 ms for 163 KB, ~75 ms for 500 KB), so the budget isn't met yet and M1 has to roughly halve it ([S2 on Workers](spikes.md#on-workers)).
 - **Safety:** the rules come from a third party, so lint regexes for catastrophic backtracking at compile time and cap inputs.
-- **Gotcha:** inside Workers, `Date.now()` and `performance.now()` don't advance during synchronous work. Benchmark the engine in Bun/Node (via the CLI) and confirm with Workers' CPU-time metrics.
+- **Gotcha:** inside Workers, `Date.now()` and `performance.now()` don't advance during synchronous work. A zero-length timer makes them advance under `wrangler dev`, but not in production. Benchmark the engine in Bun/Node (via the CLI), and measure on Workers with `wrangler tail`'s `cpuTime`.
+- **Collector caveat:** `fetch()` from a Worker replaces the origin's `Server` header with `cloudflare`, adds `cf-ray` and `cf-cache-status`, and sometimes drops `alt-svc` (S3, D-019). On Workers, the HTTP collector marks those headers as the collector's own, the engine ignores them, and Cloudflare is detected from DNS and the IP owner. S8 decides how static scans get the origin's own headers.
 
 ### Storage and privacy
 
@@ -302,22 +303,24 @@ The Worker never executes fetched JavaScript: the engine only parses it and matc
 | D-006 | 2026-11-03 | Fingerprints: vendor `enthec/webappanalyzer` at a pinned commit; add Stacter rules in the same format | Decided (S1 confirmed the license and format) |
 | D-007 | 2026-11-03 | `htmlparser2` + `css-select` for parsing (portable), not `HTMLRewriter` | Proposed |
 | D-008 | 2026-11-03 | Vitest across the repo, run through Bun. Engine tests run under Node and inside workerd via `@cloudflare/vitest-plugin` (the renamed `vitest-pool-workers`) | Decided (M0) |
-| D-009 | 2026-11-03 | DNS via DoH JSON APIs. IP owner via Team Cymru over DoH (two DNS queries through the same client), with RIPEstat as the fallback | Decided (S4) |
+| D-009 | 2026-11-03 | DNS via DoH JSON APIs. IP owner via Team Cymru over DoH (two DNS queries through the same client), with RIPEstat as the fallback | Decided (S4; confirmed from Workers: 150–300 ms, against 0.5–1.5 s for RIPEstat) |
 | D-010 | 2026-11-03 | Project license: **GPL-3.0-only**, matching the fingerprint data (GPL v3, no "or any later version" notice). It covers the whole repo, including the engine when it ships to browsers later | Decided |
 | D-011 | 2026-11-03 | Scan permalinks are unlisted and `noindex`; no public "recent scans" feed in v1 | Proposed |
 | D-012 | 2026-11-03 | Never evade bot protection (no residential proxies, no CAPTCHA solving): report "blocked" and explain it | Decided |
-| D-013 | 2026-11-03 | Workers Paid from M2: the free plan's 10 ms CPU limit won't fit rule matching | Decided |
+| D-013 | 2026-11-03 | Workers Paid from M2: the free plan's 10 ms CPU limit won't fit rule matching | Decided (S2 and S5 confirmed it: the Free plan killed matching and rendered-scan requests at 10 ms) |
 | D-014 | 2026-11-03 | Deploy from GitHub Actions on pushes to `main`, and only once the `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets exist (rather than Workers Builds): one pipeline, and deploys only happen after the checks pass | Decided |
 | D-015 | 2026-11-03 | TypeScript 6.0: typescript-eslint doesn't support TypeScript 7 yet (`<6.1.0`). Revisit when it does | Decided |
 | D-016 | 2026-11-03 | Workers runtime types are generated by `wrangler types` on install, not committed | Decided |
 | D-017 | 2026-11-03 | Layer placement: category → layer defaults; for multi-category technologies, prefer framework > server > hosting > edge > frontend > services; place evidence by its source when that points to another layer (NS records → DNS); per-technology overrides | Proposed (S1); confirm in M1 |
-| D-018 | 2026-11-03 | Matching: required-literal prefilter with one Aho–Corasick pass per input, lazy RegExp compilation, and setup precomputed at build time | Decided (S2) |
+| D-018 | 2026-11-03 | Matching: required-literal prefilter with one Aho–Corasick pass per input, lazy RegExp compilation, and setup precomputed at build time | Decided (S2). On Workers it still costs 2–3× Node's CPU time, so M1 must optimise further |
+| D-019 | 2026-11-04 | Static scans that run on Workers never use `server`, `cf-ray` or `cf-cache-status` from a fetched response as evidence, because Workers' `fetch()` rewrites or adds them for every site (S3). Cloudflare is detected from DNS (NS) and the IP owner (AS13335) | Decided (S3) |
+| D-020 | 2026-11-04 | Rendered scans: one browser context per scan inside a reused Browser Run session, sessions closed deliberately (idle `keep_alive` time is billed), and `js` rules evaluated inside the page as full property chains with their value patterns | Proposed (S5); confirm in M3 |
 
 ---
 
 ## 8. Milestones
 
-### M0 — Foundations 🟨
+### M0 — Foundations ✅
 
 **Goal:** a deployable skeleton, CI, and the risky unknowns answered.
 
@@ -331,10 +334,10 @@ The Worker never executes fetched JavaScript: the engine only parses it and matc
 - [x] Vitest in `packages/engine`, with every test running under Node and inside workerd (`@cloudflare/vitest-plugin`)
 - [x] CI: `bun install --frozen-lockfile`, lint, typecheck, test, build; green on the first run
 - [x] Spikes S1, S2 and S4 run and recorded (§9, [docs/spikes.md](spikes.md))
-- [ ] **Owner:** create `main` from this branch and make it the default branch. The repo's only branch is currently `claude/ecstatic-feynman-mk5yhj`
-- [ ] **Owner:** add the `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` repository secrets (README → Deploying)
-- [ ] First deploy of the placeholder to `*.workers.dev`
-- [ ] Spikes S3 and S5, plus the Workers half of S2 and S4 (they all need the deployed Worker)
+- [x] **Owner:** create `main` from this branch and make it the default branch (2026-11-04; `claude/ecstatic-feynman-mk5yhj` still exists at the same commit)
+- [x] **Owner:** add the `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` repository secrets (README → Deploying)
+- [x] First deploy of the placeholder to `*.workers.dev`: https://stacter.x-e14.workers.dev ([run](https://github.com/nickczj/stacter/actions/runs/41765645535))
+- [x] Spikes S3 and S5, plus the Workers half of S2 and S4, run from a throwaway spike Worker ([`spikes/worker`](../spikes/worker), deleted afterwards) and recorded in [docs/spikes.md](spikes.md)
 
 **Exit:** `main` deploys to Workers, CI is green, and spike findings are recorded in §9.
 
@@ -343,6 +346,7 @@ The Worker never executes fetched JavaScript: the engine only parses it and matc
 **Goal:** `@stacter/engine` turns a signal snapshot into detections with exact, located evidence, grouped by layer, usable from the CLI.
 
 Fingerprints
+- [ ] Spike S8: how static scans on Workers get the origin's own response headers, since `fetch()` rewrites `Server` (S3). Try Workers TCP sockets with TLS and a minimal HTTP/1.1 client, against taking server headers from rendered scans only
 - [ ] Sync script: fetch webappanalyzer at a pinned commit into `packages/fingerprints/vendor/`, with `SOURCE.md` (commit, date, license)
 - [ ] Compiler: parse pattern strings (`regex\;version:\1\;confidence:50`) into `{ regex, version, confidence }`; validate against the schema; lint regexes (flag the `[\s\S]*` + literal shape, S2); extract each regex's required literal; emit compiled JSON with stable rule IDs, the literal table and the automaton (D-018)
 - [ ] Stacter rules, same format: DNS providers (NS), email providers (MX, e.g. Cloudflare Email Routing), SPF includes, domain-verification TXT records, hosting CNAME targets, ASN → provider. Plus the S1 gaps: Next.js `/_next/` and `__NEXT_DATA__`, Nuxt's `x-powered-by: Nuxt`, and current Cloudflare cookies (`__cf_bm`; upstream still has the retired `__cfduid`). Open upstream PRs where they fit
@@ -359,16 +363,16 @@ Engine
 - [ ] Export `jsKeys()` and `domSelectors()` so the rendered collector (M3) knows what to evaluate
 
 Collectors and CLI
-- [ ] `@stacter/collect` HTTP collector: manual redirects, caps and timeouts from §6, `Set-Cookie` parsing, charset decoding
+- [ ] `@stacter/collect` HTTP collector: manual redirects, caps and timeouts from §6, `Set-Cookie` parsing, charset decoding. Record where it ran, so that on Workers the headers `fetch()` adds or rewrites (`server`, `cf-ray`, `cf-cache-status`, `alt-svc`) are marked as the collector's own and never used as evidence (D-019)
 - [ ] `@stacter/collect` DNS collector: DoH for A/AAAA/CNAME/NS/MX/TXT/CAA, plus IP owner via Team Cymru (D-009). Normalise TXT quoting, and treat an SOA-only `Authority` as "no records" (S4)
 - [ ] CLI: `stacter scan <url> [--json] [--explain]` (grouped by layer, with evidence and "why"); `stacter record <url>` (writes a trimmed fixture)
 
 Quality
 - [ ] Unit tests per matcher; ≥ 1 golden fixture per seed technology (M2 list)
 - [ ] The engine test suite passes under Bun/Node and in workerd
-- [ ] Benchmark against the S2 baseline (12–67 ms per page): < 50 ms CPU p95 for typical pages, now including `htmlparser2` extraction, which S2 didn't measure
+- [ ] Benchmark against the S2 baseline (12–67 ms per page in Node; ~20–75 ms per warm match on Workers): < 50 ms CPU p95 for typical pages **measured on Workers** (`wrangler tail` `cpuTime`), now including `htmlparser2` extraction, which S2 didn't measure
 
-**Exit:** `stacter scan` on a Nuxt-on-Cloudflare site prints Cloudflare (`cf-ray`, `server: cloudflare`) and Nuxt (`__NUXT__`, `/_nuxt/`) with located evidence, plus Vue as *inferred*. Fixtures pass in both runtimes, within the CPU budget.
+**Exit:** `stacter scan` on a Nuxt-on-Cloudflare site prints Cloudflare (`cf-ray`, `server: cloudflare` when run locally; NS records and AS13335 when run on Workers) and Nuxt (`__NUXT__`, `/_nuxt/`) with located evidence, plus Vue as *inferred*. Fixtures pass in both runtimes, within the CPU budget.
 
 ### M2 — X-ray MVP (first public release) ⬜
 
@@ -377,7 +381,7 @@ Quality
 Backend
 - [ ] `POST /api/scan` (validate → cache → collect → analyze → persist → respond) and `GET /api/scans/:id`
 - [ ] URL safety rules from §6, including re-validation on every redirect hop
-- [ ] Bot-wall detection → `blocked` status with an explanation (e.g. Cloudflare's `cf-mitigated: challenge` header). Never evade (D-012)
+- [ ] Bot-wall detection → `blocked` status with an explanation. About a third of popular sites challenge an honest scanner (S3): Cloudflare (`cf-mitigated: challenge`), DataDome, AWS WAF, PerimeterX, Akamai, plain 429s, and sites that never answer (a Cloudflare 520 from Workers). Markers can't rely on `Server` (D-019). Never evade (D-012)
 - [ ] KV cache; D1 scan records for permalinks
 - [ ] Abuse controls: Turnstile, per-IP limits (Workers Rate Limiting binding), per-target cooldown, opt-out list
 - [ ] `/about/scanner` page: what Stacter fetches, its User-Agent, how to opt out
@@ -414,8 +418,10 @@ Quality
 
 **Goal:** detect client-rendered apps, and teach why static and rendered views differ.
 
-- [ ] Browser Run via `@cloudflare/puppeteer`: ~15 s hard cap per scan, session reuse, concurrency guard (Durable Object)
-- [ ] Collect: rendered DOM, network requests (script URLs, XHR/fetch hosts), JS globals (batch-evaluate the engine's `jsKeys()`), `dom` rules including properties, cookies set by JS, TLS details if S5 confirms they're available
+- [ ] Browser Run via `@cloudflare/puppeteer`: ~15 s hard cap per scan (S5 pages took 5–11 s), session reuse with one browser context per scan, sessions closed deliberately because idle time is billed, concurrency guard (Durable Object) (D-020)
+- [ ] Collect: rendered DOM, the origin's response headers (Browser Run sees the real ones, S5), network requests (script URLs, XHR/fetch hosts), JS globals (evaluate the engine's `js` rules in the page as full property chains with their value patterns, S5), `dom` rules including properties, cookies set by JS. Not TLS: Browser Run's browser sits behind a TLS-terminating proxy (S5)
+- [ ] Check whether Browser Run, which signs its requests with Web Bot Auth, gets past the bot walls static scans hit (S3)
+- [ ] Keep the Worker's CPU per rendered scan down (S5 measured 93–521 ms): subscribe to fewer CDP events
 - [ ] Merge static and rendered evidence; tag evidence "seen only after JavaScript ran"
 - [ ] Static-vs-rendered lesson view: what appeared after JS ran, and why (SSR vs CSR)
 - [ ] Stricter limits for rendered scans (per IP per day); log browser-seconds per scan; monthly budget alarm
@@ -462,12 +468,13 @@ Quality
 | ID | Question | Approach | Status | Finding |
 |---|---|---|---|---|
 | S1 | Fingerprint data: license, schema fields (does `certIssuer` exist?), technology and category counts, layer coverage | Pull the pinned commit; read `LICENSE` and `schema.json`; draft the category → layer map | ✅ | GPL v3 with no "or later" notice (D-010). 7,695 technologies, 13,958 patterns, all valid JS RegExps. `certIssuer` exists but only 6 technologies use it. 88% of technologies have a rule a plain fetch can see; DNS rules are thin. Gaps: Next.js `/_next/`, Nuxt `x-powered-by`, a stale Cloudflare cookie; Deno has no rules of its own, Bun none at all. Category `priority` isn't a layer (D-017). [Details](spikes.md#s1--fingerprint-data) |
-| S2 | Can the engine stay under 50 ms CPU p95? | Benchmark compile + match on real pages in Bun/Node; confirm with Workers CPU-time metrics | 🟨 | Locally, running every regex costs 52–809 ms per page; a required-literal prefilter with one Aho–Corasick pass gets 12–67 ms with identical detections (D-018). The Workers check waits for a deploy. [Details](spikes.md#s2--matching-cpu-budget) |
-| S3 | How often do sites block or challenge requests from Workers? | Static-fetch ~50 popular sites from a deployed Worker; log statuses and challenge markers | ⏸️ | Needs the deployed Worker |
-| S4 | DNS and IP owner from Workers | DoH for every record type; compare Team Cymru (TXT over DoH) with RIPEstat for ASN | 🟨 | DoH JSON covers every record type (format notes recorded). Team Cymru and RIPEstat agree (D-009). Latency from Workers waits for a deploy. [Details](spikes.md#s4--dns-and-ip-owner) |
-| S5 | Browser Run capabilities and cost | Puppeteer session: JS globals, network log, cookies, TLS `securityDetails()`; browser-seconds per scan; session reuse | ⏸️ | Needs a Cloudflare account |
+| S2 | Can the engine stay under 50 ms CPU p95? | Benchmark compile + match on real pages in Bun/Node; confirm with Workers CPU-time metrics | ✅ | Locally, running every regex costs 52–809 ms per page; a required-literal prefilter with one Aho–Corasick pass gets 12–67 ms with identical detections (D-018). On Workers a warm match costs 2–3× more (~20 ms for 163 KB, ~75 ms for 500 KB), so M1 must roughly halve it. The Free plan kills it (D-013). [Details](spikes.md#s2--matching-cpu-budget) |
+| S3 | How often do sites block or challenge requests from Workers? | Static-fetch ~50 popular sites from a deployed Worker; log statuses and challenge markers | ✅ | 60 sites, Worker vs the owner's machine: 55 had the same outcome. About a third challenge or block an honest scanner wherever it runs (Cloudflare, DataDome, AWS WAF, PerimeterX, Akamai); only Google treated Workers worse. **Workers' `fetch()` rewrites `Server` to `cloudflare` and adds `cf-ray`/`cf-cache-status` on every response** (D-019, S8). Requests carry `Cf-Worker`. [Details](spikes.md#s3--fetch-reliability-from-workers) |
+| S4 | DNS and IP owner from Workers | DoH for every record type; compare Team Cymru (TXT over DoH) with RIPEstat for ASN | ✅ | DoH JSON covers every record type (format notes recorded). From Workers, Cloudflare DoH answers all 8 types in 9–22 ms; Team Cymru takes 150–300 ms and RIPEstat 0.5–1.5 s, so D-009 holds. [Details](spikes.md#s4--dns-and-ip-owner) |
+| S5 | Browser Run capabilities and cost | Puppeteer session: JS globals, network log, cookies, TLS `securityDetails()`; browser-seconds per scan; session reuse | ✅ | Works on the Free plan. Launch 2–3 s, reconnect ~1 s, page 2.4–8.2 s; ~9 s of browser time a scan (~4,000 a month included on Paid), but idle `keep_alive` time is billed too. Sees the origin's real headers, requests, cookies and globals; finds Next.js where static scans can't. TLS details come from a proxy, so they're useless. Signs requests with Web Bot Auth. `js` rules need full chains and values (D-020). [Details](spikes.md#s5--browser-run) |
 | S6 | Content pipeline | Nuxt Content on Workers (D1) vs importing `content/` as JSON at build time | ⬜ | |
-| S7 | TLS issuer for static scans | Workers' `fetch` doesn't expose the peer certificate. Options: rendered scans only, Certificate Transparency logs, or skip | ⬜ | Lower priority: S1 found only 6 technologies with `certIssuer` rules |
+| S7 | TLS issuer for static scans | Workers' `fetch` doesn't expose the peer certificate. Options: rendered scans only, Certificate Transparency logs, or skip | ⬜ | Lower priority: S1 found only 6 technologies with `certIssuer` rules. S5 ruled out rendered scans, since Browser Run's browser sees a proxy's certificate. Left: CT logs, or skip |
+| S8 | Origin response headers on Workers | `fetch()` rewrites `Server` and adds `cf-ray`/`cf-cache-status` (S3). Try Workers TCP sockets with TLS and a minimal HTTP/1.1 client (sockets can't reach Cloudflare's own IPs, but DNS already identifies those sites); otherwise take server headers from rendered scans only | ⬜ | Blocks M1's HTTP collector design |
 
 ---
 
@@ -476,13 +483,14 @@ Quality
 | Risk | Mitigation |
 |---|---|
 | Wrong detections undermine an education tool | Evidence-first UI makes mistakes visible; "report a wrong detection" turns into a new fixture; accuracy set in CI |
-| Bot walls block requests from Workers | Detect and explain (`blocked`); rendered scans; never evade (D-012) |
+| Bot walls block requests from Workers | About a third of popular sites challenge an honest scanner, from Workers or not (S3). Detect and explain (`blocked`); rendered scans (untested against walls); never evade (D-012) |
+| Workers' `fetch()` hides origin headers (`Server` becomes `cloudflare`, `cf-ray` everywhere), so static scans on Workers would "detect" Cloudflare on every site and miss 198 `Server` rules | Never use those headers as evidence on Workers (D-019); Cloudflare from DNS and IP owner; S8 for the origin's own headers |
 | ReDoS or CPU spikes from third-party regexes | Compile-time regex lint, input caps, CPU budget validated in S2 |
 | Scanner abused as a proxy or to hammer sites | Turnstile, per-IP and per-target limits, caching, honest User-Agent, opt-out |
 | XSS through evidence snippets | Render as text only; strict CSP on Stacter itself |
 | Fingerprint license (GPL-3.0) | Settle D-010 before the first public release |
 | Upstream fingerprint drift | Pinned commit, scheduled sync with diff review, unmapped-category test |
-| Browser Run cost | Per-IP daily limits, 15 s cap, budget alarm |
+| Browser Run cost | ~9 s of browser time per scan, and idle sessions are billed (S5): close sessions deliberately, per-IP daily limits, 15 s cap, budget alarm |
 | Nuxt 5 / Nitro v3 migration | Keep server routes thin; logic lives in packages |
 | Explanations go stale or are wrong | `reviewed` date and sources on every explanation; periodic review |
 
@@ -503,6 +511,7 @@ Quality
 
 Newest first. One line per meaningful change: merged work, spike results, decisions.
 
+- **2026-11-04** — M0 done. `main` is the default branch, and pushes to it deploy to https://stacter.x-e14.workers.dev ([first deploy](https://github.com/nickczj/stacter/actions/runs/41765645535)). Spikes S3 and S5 and the Workers halves of S2 and S4 ran from a throwaway spike Worker, since deleted; see [docs/spikes.md](spikes.md). Key findings: Workers' `fetch()` rewrites `Server` and adds Cloudflare headers to every response (D-019, new spike S8); matching costs 2–3× more CPU on Workers than in Node; about a third of popular sites challenge an honest scanner wherever it runs; Browser Run works but its TLS details are a proxy's, and idle sessions are billed (D-020).
 - **2026-11-03** — M0 under way. License set to GPL-3.0-only. Bun workspace with Nuxt 4 on Cloudflare Workers (`apps/web`) and `@stacter/engine` (`packages/engine`); every engine test runs under both Node and workerd; ESLint includes an engine portability guard. CI was green on its [first run](https://github.com/nickczj/stacter/actions/runs/41653430138). Spikes S1, S2 and S4 are recorded in [docs/spikes.md](spikes.md). The first deploy, S3 and S5 wait on a Cloudflare account and a `main` branch.
 - **2026-11-03** — Repository started with this plan; no code yet. Direction set: education-first X-ray with evidence for every detection, results laid out in request order (DNS → edge → hosting → server → framework → frontend → services). Stack: Nuxt 4 on Cloudflare Workers, Bun for tooling.
 
