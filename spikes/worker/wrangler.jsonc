@@ -1,0 +1,16 @@
+// Throwaway Worker for the M0 spikes (see src/index.mjs). Not part of the app or its deploys.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "stacter-spikes",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-11-03",
+  // @cloudflare/puppeteer needs nodejs_compat.
+  "compatibility_flags": ["nodejs_compat"],
+  "browser": {
+    "binding": "BROWSER"
+  },
+  "workers_dev": true,
+  "observability": {
+    "enabled": true
+  }
+}
